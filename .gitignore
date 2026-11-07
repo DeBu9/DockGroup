@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# 构建产物（从源码构建，不入库）
+dist/
+
+# 编辑器
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# 临时文件
+*.cstemp*
+*.swp
+*~
