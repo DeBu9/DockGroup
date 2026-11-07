@@ -45,8 +45,9 @@ xattr -dr com.apple.quarantine /Applications/DockGroup.app
 需要 Xcode Command Line Tools（`xcode-select --install`）与 Swift 5.9+。
 
 ```bash
-git clone https://github.com/你的用户名/DockGroup.git
+git clone https://github.com/DeBu9/DockGroup.git
 cd DockGroup
+chmod +x build.sh
 ./build.sh
 open dist/DockGroup.app
 ```
