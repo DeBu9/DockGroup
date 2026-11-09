@@ -101,11 +101,22 @@ final class DockManager {
                 "CFBundleExecutable": "DockGroup",
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": "1.0",
-                "CFBundleVersion": "2",
+                "CFBundleVersion": "3",
                 "CFBundleIconFile": "AppIcon.icns",
                 "LSMinimumSystemVersion": "13.0",
                 "LSUIElement": true,
-                "NSHighResolutionCapable": true
+                "NSHighResolutionCapable": true,
+                // Declaring a low-priority viewer for everything lets the Dock
+                // route file drops onto the tile to this app as an open-document
+                // event. Alternate rank keeps it out of the default-handler slots.
+                "CFBundleDocumentTypes": [
+                    [
+                        "CFBundleTypeName": "Any Item",
+                        "CFBundleTypeRole": "Viewer",
+                        "LSHandlerRank": "Alternate",
+                        "LSItemContentTypes": ["public.item"]
+                    ]
+                ]
             ]
             let plistData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             try plistData.write(to: contents.appendingPathComponent("Info.plist"))
@@ -129,8 +140,8 @@ final class DockManager {
         case .subgroup:
             return NSImage(systemSymbolName: "square.stack.3d.up.fill", accessibilityDescription: nil) ?? NSImage()
         default:
-            if fm.fileExists(atPath: item.path) {
-                return NSWorkspace.shared.icon(forFile: item.path)
+            if let url = item.resolveURL() {
+                return NSWorkspace.shared.icon(forFile: url.path)
             }
             return NSImage(systemSymbolName: "questionmark.app", accessibilityDescription: nil) ?? NSImage()
         }
@@ -218,6 +229,26 @@ final class DockManager {
             makeStub(for: group)
         }
         return rewriteDock(groups: store.config.groups)
+    }
+
+    /// A group can gain items from a drop on its Dock tile, which changes the
+    /// icon preview. Rebuilding a stub from inside that stub would rewrite the
+    /// running executable under itself, so the rebuild happens here in the
+    /// settings host, and only when the config is newer than the stub.
+    /// The Dock still has to be restarted before the new preview shows.
+    @discardableResult
+    func refreshStubsIfStale() -> Int {
+        guard let configDate = store.configModificationDate else { return 0 }
+        var rebuilt = 0
+        for group in store.config.groups {
+            let plist = stubURL(for: group).appendingPathComponent("Contents/Info.plist")
+            guard let attrs = try? fm.attributesOfItem(atPath: plist.path),
+                  let stubDate = attrs[.modificationDate] as? Date else { continue }
+            guard configDate > stubDate else { continue }
+            makeStub(for: group)
+            rebuilt += 1
+        }
+        return rebuilt
     }
 
     func removeFromDock() -> String {

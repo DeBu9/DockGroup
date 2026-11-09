@@ -50,6 +50,9 @@ final class PanelController {
         // A resident stub may have been edited from the settings window while
         // this process was idle; pick up the latest config each time.
         if resident { store.load() }
+        // One stat per item; only entries whose path disappeared pay for a
+        // bookmark lookup, which is what makes renames and moves survivable.
+        _ = store.repairStaleItems()
         guard let group = store.group(with: groupId) else { return false }
         self.resident = resident
 
@@ -476,7 +479,7 @@ struct GroupPanelRoot: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(TileButtonStyle())
-        .help(item.path)
+        .help(store.url(for: item)?.path ?? "\(item.path)（找不到）")
         .contextMenu {
             if item.kind == .folder {
                 Button("在面板中展开") { expand(item) }
@@ -494,8 +497,8 @@ struct GroupPanelRoot: View {
         case .subgroup:
             return Image(systemName: "square.stack.3d.up.fill")
         default:
-            if FileManager.default.fileExists(atPath: item.path) {
-                return Image(nsImage: NSWorkspace.shared.icon(forFile: item.path))
+            if let url = store.url(for: item) {
+                return Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
             }
             return Image(systemName: "questionmark.app")
         }
@@ -527,21 +530,44 @@ struct GroupPanelRoot: View {
                 NSWorkspace.shared.open(url)
             }
         default:
-            NSWorkspace.shared.open(URL(fileURLWithPath: item.path))
+            guard let url = openableURL(for: item) else {
+                onClose()
+                AppDelegate.shared?.reportMissing(item)
+                return
+            }
+            NSWorkspace.shared.open(url)
         }
         onClose()
     }
 
+    /// Bookmark first, Spotlight search as a last resort before giving up.
+    private func openableURL(for item: GroupItem) -> URL? {
+        if let url = store.url(for: item) { return url }
+        return store.searchForMovedItem(item)
+    }
+
     private func expand(_ item: GroupItem) {
-        let url = URL(fileURLWithPath: item.path)
+        guard let url = openableURL(for: item) else {
+            onClose()
+            AppDelegate.shared?.reportMissing(item)
+            return
+        }
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        let children = contents.prefix(80).map { GroupItem.from(url: $0, localized: false) }
+        // Children live only for this session, so skip their bookmark creation.
+        let children = contents.prefix(80).map {
+            GroupItem.from(url: $0, localized: false, captureIdentity: false)
+        }
         push(item.name, children)
     }
 
     private func reveal(_ item: GroupItem) {
-        NSWorkspace.shared.selectFile(item.path, inFileViewerRootedAtPath: "")
+        guard let url = store.url(for: item) else {
+            AppDelegate.shared?.reportMissing(item)
+            onClose()
+            return
+        }
+        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
         onClose()
     }
 }

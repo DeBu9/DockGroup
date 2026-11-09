@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CoreServices
 
 enum ItemKind: String, Codable, CaseIterable {
@@ -27,14 +28,57 @@ struct GroupItem: Codable, Identifiable, Hashable {
     /// True once the user edits the name; auto-refresh skips those items.
     /// Optional so configs written by older builds decode unchanged.
     var customName: Bool?
+    /// Bookmark for the target. A bookmark follows the file through renames and
+    /// moves on the same volume, which an absolute path cannot do. Optional so
+    /// configs written by older builds decode unchanged.
+    var bookmark: Data?
+    /// Bundle identifier for app items. Used as a second anchor: LaunchServices
+    /// can find a moved .app even when its bookmark went stale (cross-volume
+    /// move, restore from backup, app replaced by an upgrade).
+    var bundleID: String?
 
     init(id: UUID = UUID(), name: String, path: String, kind: ItemKind,
-         customName: Bool? = nil) {
+         customName: Bool? = nil, bookmark: Data? = nil, bundleID: String? = nil) {
         self.id = id
         self.name = name
         self.path = path
         self.kind = kind
         self.customName = customName
+        self.bookmark = bookmark
+        self.bundleID = bundleID
+    }
+
+    /// Identity anchors captured when the item is added or repaired.
+    static func identity(of url: URL) -> (bookmark: Data?, bundleID: String?) {
+        let data = try? url.bookmarkData(options: [],
+                                         includingResourceValuesForKeys: nil,
+                                         relativeTo: nil)
+        let bundleID = url.pathExtension == "app" ? Bundle(url: url)?.bundleIdentifier : nil
+        return (data, bundleID)
+    }
+
+    /// Where the item actually is right now, or nil when it can no longer be
+    /// found. The plain path check is the fast path (~10 µs); the bookmark and
+    /// the LaunchServices lookup only run once the path is gone.
+    func resolveURL() -> URL? {
+        if kind == .web || kind == .subgroup { return nil }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path) { return URL(fileURLWithPath: path) }
+        if let data = bookmark {
+            var stale = false
+            if let url = try? URL(resolvingBookmarkData: data,
+                                  options: [.withoutUI],
+                                  relativeTo: nil,
+                                  bookmarkDataIsStale: &stale),
+               fm.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        if let bundleID = bundleID,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return url
+        }
+        return nil
     }
 
     /// Finder's localized display name. On macOS 27 only Spotlight metadata
@@ -57,7 +101,9 @@ struct GroupItem: Codable, Identifiable, Hashable {
 
     /// `localized: false` skips the Spotlight lookup, used when expanding a
     /// folder that may contain dozens of children on the interactive path.
-    static func from(url: URL, localized: Bool = true) -> GroupItem {
+    /// `captureIdentity: false` skips bookmark creation, same reason: those
+    /// children only live for one panel session.
+    static func from(url: URL, localized: Bool = true, captureIdentity: Bool = true) -> GroupItem {
         let path = url.standardizedFileURL.path
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
@@ -72,7 +118,13 @@ struct GroupItem: Codable, Identifiable, Hashable {
         let name = localized
             ? resolvedName(for: url)
             : url.deletingPathExtension().lastPathComponent
-        return GroupItem(name: name, path: path, kind: kind)
+        var item = GroupItem(name: name, path: path, kind: kind)
+        if captureIdentity {
+            let anchors = identity(of: url)
+            item.bookmark = anchors.bookmark
+            item.bundleID = anchors.bundleID
+        }
+        return item
     }
 }
 

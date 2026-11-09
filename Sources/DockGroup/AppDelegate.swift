@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stubGroupID: UUID?
     private var showingPanel = false
     private var lastPanelShow: TimeInterval = 0
+    /// Files dropped on the Dock tile can arrive before didFinishLaunching.
+    private var pendingDropURLs: [URL] = []
 
     // MARK: - Launch
 
@@ -39,21 +41,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             stubGroupID = id
+            let dropped = pendingDropURLs
+            pendingDropURLs = []
             // Defer one runloop turn: activating from inside didFinishLaunching
             // is too early and AppKit silently refuses it.
-            DispatchQueue.main.async { self.showStubPanel() }
+            DispatchQueue.main.async {
+                if dropped.isEmpty {
+                    self.showStubPanel()
+                } else {
+                    self.ingest(dropped)
+                }
+            }
             return
         }
 
         setMenuBarVisible(MenuBarPreference.isVisible)
+        // Configs written by older builds only carry paths; add bookmarks once
+        // so later renames and moves can be resolved. Both calls are no-ops
+        // once every item is anchored.
+        _ = store.backfillBookmarks()
+        _ = store.repairStaleItems()
+        // A drop on a Dock tile changes that group's icon preview; rebuild any
+        // stub that is older than the config before showing the settings window.
+        _ = dock.refreshStubsIfStale()
 
         if let id = pendingURLGroupID {
             // Cold-launched by a legacy stub via dockgroup://.
             pendingURLGroupID = nil
             _ = PanelController.shared.show(groupId: id, store: store, resident: true)
+        } else if !pendingDropURLs.isEmpty {
+            let dropped = pendingDropURLs
+            pendingDropURLs = []
+            ingest(dropped)
         } else {
             openSettingsWindow()
         }
+    }
+
+    /// Dock tile drops arrive as open-document events. For a stub the target
+    /// group is the stub's own; for the settings host it is the selected group.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let files = urls.filter { $0.isFileURL }
+        guard !files.isEmpty else { return }
+        guard didFinish else {
+            pendingDropURLs.append(contentsOf: files)
+            return
+        }
+        ingest(files)
+    }
+
+    private func ingest(_ urls: [URL]) {
+        let fm = FileManager.default
+        let targets = urls.filter { url in
+            let path = url.standardizedFileURL.path
+            // Never index our own generated tiles, and ignore stale drops.
+            return !path.contains("/DockGroup/Stubs/") && fm.fileExists(atPath: path)
+        }
+        guard !targets.isEmpty else {
+            if LaunchMode.isStub { showStubPanel() }
+            return
+        }
+        let items = targets.map { GroupItem.from(url: $0) }
+
+        if LaunchMode.isStub {
+            guard let id = stubGroupID else { return }
+            _ = store.addItems(items, to: id)
+            // Let a rebuild happen even if the panel was just shown.
+            lastPanelShow = 0
+            showStubPanel()
+            return
+        }
+
+        guard let groupID = SettingsState.shared.selectedID ?? store.config.groups.first?.id else {
+            openSettingsWindow()
+            return
+        }
+        let added = store.addItems(items, to: groupID)
+        SettingsState.shared.status = "已添加 \(added) 项到「\(store.group(with: groupID)?.name ?? "")」"
+        openSettingsWindow()
     }
 
     /// Reopen events are only relevant while a stub is still alive (the
@@ -103,6 +168,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         DispatchQueue.main.async {
             _ = PanelController.shared.show(groupId: id, store: self.store, resident: true)
+        }
+    }
+
+    /// Called when a tile cannot be resolved even after the bookmark fallback.
+    /// The item is left in the group so the settings window can still show it.
+    func reportMissing(_ item: GroupItem) {
+        let alert = NSAlert()
+        alert.messageText = "找不到「\(item.name)」"
+        alert.informativeText = "记住的位置：\(item.path)\n文件可能已被删除，或移到了其他磁盘。可以在设置窗口里重新添加或删除该条目。"
+        alert.addButton(withTitle: "打开设置")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            openSettingsWindow()
         }
     }
 

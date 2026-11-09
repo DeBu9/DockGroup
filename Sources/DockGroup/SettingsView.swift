@@ -60,9 +60,15 @@ struct SettingsView: View {
         .frame(width: 780, height: 580)
         .onAppear {
             if state.selectedID == nil { state.selectedID = store.config.groups.first?.id }
+            let relocated = store.repairStaleItems()
+            let anchored = store.backfillBookmarks()
             let renamed = store.refreshNames()
-            if renamed > 0 {
+            if relocated > 0 {
+                state.status = "已自动修复 \(relocated) 个移动或改名过的项目"
+            } else if renamed > 0 {
                 state.status = "已按访达中文名更新 \(renamed) 个项目"
+            } else if anchored > 0 {
+                state.status = "已为 \(anchored) 个项目建立位置记录，之后移动或改名仍可打开"
             }
         }
     }
@@ -109,9 +115,9 @@ struct SettingsView: View {
                             ))
                             .textFieldStyle(.plain)
                             .lineLimit(1)
-                            Text(item.path)
+                            Text(displayPath(item))
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(isBroken(item) ? .red : .secondary)
                                 .lineLimit(1)
                         }
                         Spacer()
@@ -176,7 +182,7 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(2)
-            Text("默认零后台：面板关闭后立即退出进程，每次点击约 140 ms。开启上面的驻留开关后，进程会保留 3 分钟（约 21 MB 内存、0% CPU），期间再次点击约 38 ms。名称可直接点击修改，改过的名称不会被自动刷新覆盖；「刷新系统中文名」会把未自定义的条目改为访达显示名。升级主程序后请点一次「同步到 Dock」以更新占位 app；同步前会自动备份 com.apple.dock。")
+            Text("默认零后台：面板关闭后立即退出进程，每次点击约 140 ms。开启上面的驻留开关后，进程会保留 3 分钟（约 21 MB 内存、0% CPU），期间再次点击约 38 ms。名称可直接点击修改，改过的名称不会被自动刷新覆盖；「刷新系统中文名」会把未自定义的条目改为访达显示名。把 app 或文件直接拖到 Dock 上的组图标即可添加进该组（图标预览在下次同步或重启 Dock 后更新）。项目的位置以书签记录，移动或改名后仍能打开；只有删除或跨磁盘移动且已找不到时才需要重新添加。升级主程序后请点一次「同步到 Dock」以更新占位 app；同步前会自动备份 com.apple.dock。")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -239,11 +245,23 @@ struct SettingsView: View {
             Image(systemName: "globe")
         } else if item.kind == .subgroup {
             Image(systemName: "square.stack.3d.up.fill")
-        } else if FileManager.default.fileExists(atPath: item.path) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: item.path)).resizable()
+        } else if let url = store.url(for: item) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable()
         } else {
             Image(systemName: "questionmark.app")
         }
+    }
+
+    private func isBroken(_ item: GroupItem) -> Bool {
+        (item.kind == .app || item.kind == .file || item.kind == .folder)
+            && store.url(for: item) == nil
+    }
+
+    /// Shows the current location, which differs from the stored path once the
+    /// item has been moved and auto-repaired.
+    private func displayPath(_ item: GroupItem) -> String {
+        if isBroken(item) { return item.path + "（找不到，请删除后重新添加）" }
+        return store.url(for: item)?.path ?? item.path
     }
 
     // MARK: - Actions
@@ -289,7 +307,7 @@ struct SettingsView: View {
                 }
                 guard let url = url else { return }
                 DispatchQueue.main.async {
-                    store.addItem(GroupItem.from(url: url), to: groupID)
+                    store.addItems([GroupItem.from(url: url)], to: groupID)
                 }
             }
         }
